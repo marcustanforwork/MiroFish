@@ -1018,7 +1018,14 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
     # 如果 .env 中没有模型名，则使用 config 作为备用
     if not llm_model:
         llm_model = config.get("llm_model", "gpt-4o-mini")
-    
+
+    # SnapPool: the agents run on their own (cheap) model while the backend's
+    # LLM_MODEL_NAME keeps doing personas, config and the report.
+    sim_model = os.environ.get("LLM_SIM_MODEL_NAME", "")
+    if sim_model and not (use_boost and has_boost_config):
+        llm_model = sim_model
+        config_label = f"{config_label}[SIM]"
+
     # 设置 camel-ai 所需的环境变量
     if llm_api_key:
         os.environ["OPENAI_API_KEY"] = llm_api_key
@@ -1030,10 +1037,18 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
         os.environ["OPENAI_API_BASE_URL"] = llm_base_url
     
     print(f"{config_label} model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else '默认'}...")
-    
+
+    # Never put max_tokens here: camel reads it as the agent's whole context
+    # window (BaseModelBackend.token_limit), not as a cap on the reply.
+    model_config = None
+    reasoning_effort = os.environ.get("LLM_SIM_REASONING_EFFORT", "")
+    if reasoning_effort:
+        model_config = {"reasoning_effort": reasoning_effort}
+
     return ModelFactory.create(
         model_platform=ModelPlatformType.OPENAI,
         model_type=llm_model,
+        model_config_dict=model_config,
     )
 
 
