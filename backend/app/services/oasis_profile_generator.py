@@ -718,6 +718,18 @@ class OasisProfileGenerator:
         base_prompt = "你是社交媒体用户画像生成专家。生成详细、真实的人设用于舆论模拟,最大程度还原已有现实情况。必须返回有效的JSON格式，所有字符串值不能包含未转义的换行符。"
         return f"{base_prompt}\n\n{get_language_instruction()}"
     
+    @staticmethod
+    def _default_country() -> str:
+        """缺省国家：中文运行保持"中国"，其他语言用"Unknown"，避免被错误归入某个地区"""
+        return "中国" if get_locale() == 'zh' else "Unknown"
+
+    @staticmethod
+    def _country_instruction() -> str:
+        """国家字段的语言跟随当前locale，便于按地区统计"""
+        if get_locale() == 'zh':
+            return '国家（使用中文，如"中国"）'
+        return '国家（使用英文国名，如"Singapore"）'
+
     def _build_individual_persona_prompt(
         self,
         entity_name: str,
@@ -755,7 +767,7 @@ class OasisProfileGenerator:
 3. age: 年龄数字（必须是整数）
 4. gender: 性别，必须是英文: "male" 或 "female"
 5. mbti: MBTI类型（如INTJ、ENFP等）
-6. country: 国家（使用中文，如"中国"）
+6. country: {self._country_instruction()}
 7. profession: 职业
 8. interested_topics: 感兴趣话题数组
 
@@ -804,7 +816,7 @@ class OasisProfileGenerator:
 3. age: 固定填30（机构账号的虚拟年龄）
 4. gender: 固定填"other"（机构账号使用other表示非个人）
 5. mbti: MBTI类型，用于描述账号风格，如ISTJ代表严谨保守
-6. country: 国家（使用中文，如"中国"）
+6. country: {self._country_instruction()}
 7. profession: 机构职能描述
 8. interested_topics: 关注领域数组
 
@@ -858,7 +870,7 @@ class OasisProfileGenerator:
                 "age": 30,  # 机构虚拟年龄
                 "gender": "other",  # 机构使用other
                 "mbti": "ISTJ",  # 机构风格：严谨保守
-                "country": "中国",
+                "country": self._default_country(),
                 "profession": "Media",
                 "interested_topics": ["General News", "Current Events", "Public Affairs"],
             }
@@ -870,7 +882,7 @@ class OasisProfileGenerator:
                 "age": 30,  # 机构虚拟年龄
                 "gender": "other",  # 机构使用other
                 "mbti": "ISTJ",  # 机构风格：严谨保守
-                "country": "中国",
+                "country": self._default_country(),
                 "profession": entity_type,
                 "interested_topics": ["Public Policy", "Community", "Official Announcements"],
             }
@@ -1220,7 +1232,7 @@ class OasisProfileGenerator:
                 "age": profile.age if profile.age else 30,
                 "gender": self._normalize_gender(profile.gender),
                 "mbti": profile.mbti if profile.mbti else "ISTJ",
-                "country": profile.country if profile.country else "中国",
+                "country": profile.country if profile.country else self._default_country(),
             }
             
             # 可选字段
