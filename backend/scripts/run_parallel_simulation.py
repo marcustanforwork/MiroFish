@@ -155,6 +155,7 @@ def init_logging_for_simulation(simulation_dir: str):
         shutil.rmtree(old_log_dir, ignore_errors=True)
 
 
+from simulation_events import group_posts_by_agent, posts_for_round, schedule_problems
 from action_logger import SimulationLogManager, PlatformActionLogger
 
 try:
@@ -1113,6 +1114,48 @@ class PlatformSimulation:
         self.total_actions = 0
 
 
+def log_db_actions(
+    round_num: int,
+    db_path: str,
+    last_rowid: int,
+    agent_names: Dict[int, str],
+    action_logger: Optional[PlatformActionLogger],
+) -> Tuple[int, int]:
+    """Log what the platform recorded since last_rowid as this round's actions; returns (count, new last_rowid)."""
+    actual_actions, last_rowid = fetch_new_actions_from_db(db_path, last_rowid, agent_names)
+    if action_logger:
+        for action_data in actual_actions:
+            action_logger.log_action(
+                round_num=round_num,
+                agent_id=action_data['agent_id'],
+                agent_name=action_data['agent_name'],
+                action_type=action_data['action_type'],
+                action_args=action_data['action_args']
+            )
+    return len(actual_actions), last_rowid
+
+
+async def publish_posts(env, posts: List[Dict[str, Any]], log_info) -> int:
+    """Publish operator posts (initial or scheduled) as manual CREATE_POST actions, every post of every poster."""
+    actions = {}
+    published = 0
+    for agent_id, contents in group_posts_by_agent(posts).items():
+        try:
+            agent = env.agent_graph.get_agent(agent_id)
+        except Exception as e:
+            log_info(f"跳过帖子: 找不到 agent {agent_id} ({e})")
+            continue
+        manual = [
+            ManualAction(action_type=ActionType.CREATE_POST, action_args={"content": content})
+            for content in contents
+        ]
+        actions[agent] = manual if len(manual) > 1 else manual[0]
+        published += len(manual)
+    if actions:
+        await env.step(actions)
+    return published
+
+
 async def run_twitter_simulation(
     config: Dict[str, Any], 
     simulation_dir: str,
@@ -1183,43 +1226,20 @@ async def run_twitter_simulation(
     total_actions = 0
     last_rowid = 0  # 跟踪数据库中最后处理的行号（使用 rowid 避免 created_at 格式差异）
     
-    # 执行初始事件
+    # 执行初始事件（round 0 的帖子，以及之后各轮的定时帖子）
     event_config = config.get("event_config", {})
-    initial_posts = event_config.get("initial_posts", [])
     
     # 记录 round 0 开始（初始事件阶段）
     if action_logger:
         action_logger.log_round_start(0, 0)  # round 0, simulated_hour 0
     
     initial_action_count = 0
+    initial_posts = posts_for_round(event_config, 0)
     if initial_posts:
-        initial_actions = {}
-        for post in initial_posts:
-            agent_id = post.get("poster_agent_id", 0)
-            content = post.get("content", "")
-            try:
-                agent = result.env.agent_graph.get_agent(agent_id)
-                initial_actions[agent] = ManualAction(
-                    action_type=ActionType.CREATE_POST,
-                    action_args={"content": content}
-                )
-                
-                if action_logger:
-                    action_logger.log_action(
-                        round_num=0,
-                        agent_id=agent_id,
-                        agent_name=agent_names.get(agent_id, f"Agent_{agent_id}"),
-                        action_type="CREATE_POST",
-                        action_args={"content": content}
-                    )
-                    total_actions += 1
-                    initial_action_count += 1
-            except Exception:
-                pass
-        
-        if initial_actions:
-            await result.env.step(initial_actions)
-            log_info(f"已发布 {len(initial_actions)} 条初始帖子")
+        published = await publish_posts(result.env, initial_posts, log_info)
+        initial_action_count, last_rowid = log_db_actions(0, db_path, last_rowid, agent_names, action_logger)
+        total_actions += initial_action_count
+        log_info(f"已发布 {published} 条初始帖子")
     
     # 记录 round 0 结束
     if action_logger:
@@ -1237,6 +1257,9 @@ async def run_twitter_simulation(
         total_rounds = min(total_rounds, max_rounds)
         if total_rounds < original_rounds:
             log_info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
+    
+    for problem in schedule_problems(event_config, total_rounds, agent_names.keys()):
+        log_info(f"定时帖子不会发布: {problem}")
     
     start_time = datetime.now()
     
@@ -1259,33 +1282,25 @@ async def run_twitter_simulation(
         if action_logger:
             action_logger.log_round_start(round_num + 1, simulated_hour)
         
-        if not active_agents:
-            # 没有活跃agent时也记录round结束（actions_count=0）
-            if action_logger:
-                action_logger.log_round_end(round_num + 1, 0)
-            continue
-        
-        actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
-        
-        # 从数据库获取实际执行的动作并记录
-        actual_actions, last_rowid = fetch_new_actions_from_db(
-            db_path, last_rowid, agent_names
-        )
-        
         round_action_count = 0
-        for action_data in actual_actions:
-            if action_logger:
-                action_logger.log_action(
-                    round_num=round_num + 1,
-                    agent_id=action_data['agent_id'],
-                    agent_name=action_data['agent_name'],
-                    action_type=action_data['action_type'],
-                    action_args=action_data['action_args']
-                )
-                total_actions += 1
-                round_action_count += 1
         
+        # 本轮的定时帖子先发布，Agent在同一轮就能看到
+        scheduled_posts = posts_for_round(event_config, round_num + 1)
+        if scheduled_posts:
+            published = await publish_posts(result.env, scheduled_posts, log_info)
+            count, last_rowid = log_db_actions(round_num + 1, db_path, last_rowid, agent_names, action_logger)
+            round_action_count += count
+            log_info(f"第 {round_num + 1} 轮发布了 {published} 条定时帖子")
+        
+        if active_agents:
+            actions = {agent: LLMAction() for _, agent in active_agents}
+            await result.env.step(actions)
+            
+            # 从数据库获取实际执行的动作并记录
+            count, last_rowid = log_db_actions(round_num + 1, db_path, last_rowid, agent_names, action_logger)
+            round_action_count += count
+        
+        total_actions += round_action_count
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
         
@@ -1374,51 +1389,20 @@ async def run_reddit_simulation(
     total_actions = 0
     last_rowid = 0  # 跟踪数据库中最后处理的行号（使用 rowid 避免 created_at 格式差异）
     
-    # 执行初始事件
+    # 执行初始事件（round 0 的帖子，以及之后各轮的定时帖子）
     event_config = config.get("event_config", {})
-    initial_posts = event_config.get("initial_posts", [])
     
     # 记录 round 0 开始（初始事件阶段）
     if action_logger:
         action_logger.log_round_start(0, 0)  # round 0, simulated_hour 0
     
     initial_action_count = 0
+    initial_posts = posts_for_round(event_config, 0)
     if initial_posts:
-        initial_actions = {}
-        for post in initial_posts:
-            agent_id = post.get("poster_agent_id", 0)
-            content = post.get("content", "")
-            try:
-                agent = result.env.agent_graph.get_agent(agent_id)
-                if agent in initial_actions:
-                    if not isinstance(initial_actions[agent], list):
-                        initial_actions[agent] = [initial_actions[agent]]
-                    initial_actions[agent].append(ManualAction(
-                        action_type=ActionType.CREATE_POST,
-                        action_args={"content": content}
-                    ))
-                else:
-                    initial_actions[agent] = ManualAction(
-                        action_type=ActionType.CREATE_POST,
-                        action_args={"content": content}
-                    )
-                
-                if action_logger:
-                    action_logger.log_action(
-                        round_num=0,
-                        agent_id=agent_id,
-                        agent_name=agent_names.get(agent_id, f"Agent_{agent_id}"),
-                        action_type="CREATE_POST",
-                        action_args={"content": content}
-                    )
-                    total_actions += 1
-                    initial_action_count += 1
-            except Exception:
-                pass
-        
-        if initial_actions:
-            await result.env.step(initial_actions)
-            log_info(f"已发布 {len(initial_actions)} 条初始帖子")
+        published = await publish_posts(result.env, initial_posts, log_info)
+        initial_action_count, last_rowid = log_db_actions(0, db_path, last_rowid, agent_names, action_logger)
+        total_actions += initial_action_count
+        log_info(f"已发布 {published} 条初始帖子")
     
     # 记录 round 0 结束
     if action_logger:
@@ -1436,6 +1420,9 @@ async def run_reddit_simulation(
         total_rounds = min(total_rounds, max_rounds)
         if total_rounds < original_rounds:
             log_info(f"轮数已截断: {original_rounds} -> {total_rounds} (max_rounds={max_rounds})")
+    
+    for problem in schedule_problems(event_config, total_rounds, agent_names.keys()):
+        log_info(f"定时帖子不会发布: {problem}")
     
     start_time = datetime.now()
     
@@ -1458,33 +1445,25 @@ async def run_reddit_simulation(
         if action_logger:
             action_logger.log_round_start(round_num + 1, simulated_hour)
         
-        if not active_agents:
-            # 没有活跃agent时也记录round结束（actions_count=0）
-            if action_logger:
-                action_logger.log_round_end(round_num + 1, 0)
-            continue
-        
-        actions = {agent: LLMAction() for _, agent in active_agents}
-        await result.env.step(actions)
-        
-        # 从数据库获取实际执行的动作并记录
-        actual_actions, last_rowid = fetch_new_actions_from_db(
-            db_path, last_rowid, agent_names
-        )
-        
         round_action_count = 0
-        for action_data in actual_actions:
-            if action_logger:
-                action_logger.log_action(
-                    round_num=round_num + 1,
-                    agent_id=action_data['agent_id'],
-                    agent_name=action_data['agent_name'],
-                    action_type=action_data['action_type'],
-                    action_args=action_data['action_args']
-                )
-                total_actions += 1
-                round_action_count += 1
         
+        # 本轮的定时帖子先发布，Agent在同一轮就能看到
+        scheduled_posts = posts_for_round(event_config, round_num + 1)
+        if scheduled_posts:
+            published = await publish_posts(result.env, scheduled_posts, log_info)
+            count, last_rowid = log_db_actions(round_num + 1, db_path, last_rowid, agent_names, action_logger)
+            round_action_count += count
+            log_info(f"第 {round_num + 1} 轮发布了 {published} 条定时帖子")
+        
+        if active_agents:
+            actions = {agent: LLMAction() for _, agent in active_agents}
+            await result.env.step(actions)
+            
+            # 从数据库获取实际执行的动作并记录
+            count, last_rowid = log_db_actions(round_num + 1, db_path, last_rowid, agent_names, action_logger)
+            round_action_count += count
+        
+        total_actions += round_action_count
         if action_logger:
             action_logger.log_round_end(round_num + 1, round_action_count)
         
