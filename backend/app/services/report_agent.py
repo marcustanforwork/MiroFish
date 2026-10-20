@@ -29,6 +29,12 @@ from .zep_tools import (
     PanoramaResult,
     InterviewResult
 )
+from .simulation_activity import (
+    SimulationActivityStore,
+    format_search_results,
+    format_statistics,
+    format_survey_answers,
+)
 
 logger = get_logger('mirofish.report_agent')
 
@@ -520,6 +526,44 @@ TOOL_DESC_QUICK_SEARCH = """\
 【返回内容】
 - 与查询最相关的事实列表"""
 
+TOOL_DESC_SEARCH_POSTS = """\
+【原帖检索 - 模拟中Agent实际写下的原文】
+直接检索模拟数据库中Agent发布的帖子、引用和评论，返回逐字原文，
+并标注作者、所属群体（实体类型）、地区、平台和轮次，以及被回复的帖子。
+
+【使用场景】
+- 需要引用Agent在模拟中真正说过的话（比图谱事实更准确）
+- 需要按群体或地区查看某个话题的真实反应
+- 需要核实某个观点是否真的出现过、由谁提出
+
+【返回内容】
+- 按相关度排序的原文列表（可直接引用）"""
+
+TOOL_DESC_SIMULATION_STATISTICS = """\
+【模拟统计 - 模拟过程的真实数据】
+返回整个模拟的计数统计：各平台和各轮次的动作数、各群体和各地区的Agent数、
+活跃Agent数、发言数，最活跃的Agent，以及获得最多点赞/转发/评论的帖子。
+
+【使用场景】
+- 判断某个结论是由多少人、哪些群体和地区支撑的
+- 描述讨论热度随轮次的变化
+- 找出传播最广的信息
+
+【返回内容】
+- 数字统计和热门帖子列表"""
+
+TOOL_DESC_SURVEY_ANSWERS = """\
+【问卷回答 - 模拟结束后对Agent的统一问卷】
+读取模拟结束后对每个Agent进行的问卷采访的原始回答（每个Agent每个平台最新一次），
+标注群体和地区。可用关键词筛选。若未进行问卷，会返回提示。
+
+【使用场景】
+- 需要统计购买意向（YES/MAYBE/NO）、价格区间、替代方案
+- 需要引用Agent对问卷问题的第一人称回答
+
+【返回内容】
+- 问卷回答原文列表"""
+
 TOOL_DESC_INTERVIEW_AGENTS = """\
 【深度采访 - 真实Agent采访（双平台）】
 调用OASIS模拟环境的采访API，对正在运行的模拟Agent进行真实采访！
@@ -600,6 +644,9 @@ PLAN_USER_PROMPT_TEMPLATE = """\
 
 【模拟预测到的部分未来事实样本】
 {related_facts_json}
+
+【模拟实际发生的活动统计（来自模拟数据库）】
+{activity_statistics}
 
 请以「上帝视角」审视这个未来预演：
 1. 在我们设定的条件下，未来呈现出了什么样的状态？
@@ -715,10 +762,7 @@ SECTION_SYSTEM_PROMPT_TEMPLATE = """\
 {tools_description}
 
 【工具使用建议 - 请混合使用不同工具，不要只用一种】
-- insight_forge: 深度洞察分析，自动分解问题并多维度检索事实和关系
-- panorama_search: 广角全景搜索，了解事件全貌、时间线和演变过程
-- quick_search: 快速验证某个具体信息点
-- interview_agents: 采访模拟Agent，获取不同角色的第一人称观点和真实反应
+{tool_suggestions}
 
 ═══════════════════════════════════════════════════════════════
 【工作流程】
@@ -893,25 +937,33 @@ class ReportAgent:
         simulation_id: str,
         simulation_requirement: str,
         llm_client: Optional[LLMClient] = None,
-        zep_tools: Optional[ZepToolsService] = None
+        zep_tools: Optional[ZepToolsService] = None,
+        activity_store: Optional[SimulationActivityStore] = None,
+        interviews_available: Optional[bool] = None
     ):
         """
         初始化Report Agent
-        
+
         Args:
             graph_id: 图谱ID
             simulation_id: 模拟ID
             simulation_requirement: 模拟需求描述
             llm_client: LLM客户端（可选）
             zep_tools: Zep工具服务（可选）
+            activity_store: 模拟数据库读取器（可选，默认按simulation_id读取）
+            interviews_available: 模拟环境是否可采访（可选，默认实时检测）
         """
         self.graph_id = graph_id
         self.simulation_id = simulation_id
         self.simulation_requirement = simulation_requirement
-        
+
         self.llm = llm_client or LLMClient()
         self.zep_tools = zep_tools or ZepToolsService()
-        
+        self.activity_store = activity_store or SimulationActivityStore.for_simulation(simulation_id)
+        if interviews_available is None:
+            interviews_available = self._env_alive(simulation_id)
+        self.interviews_available = interviews_available
+
         # 工具定义
         self.tools = self._define_tools()
         
@@ -924,7 +976,30 @@ class ReportAgent:
     
     def _define_tools(self) -> Dict[str, Dict[str, Any]]:
         """定义可用工具"""
-        return {
+        tools = {
+            "search_posts": {
+                "name": "search_posts",
+                "description": TOOL_DESC_SEARCH_POSTS,
+                "parameters": {
+                    "query": "要检索的关键词或话题",
+                    "segment": "只看某个群体/实体类型（可选，如 EventPlanner）",
+                    "region": "只看某个地区（可选，如 Southeast Asia、Japan and Korea）",
+                    "platform": "只看某个平台（可选，twitter 或 reddit）",
+                    "limit": "返回数量（可选，默认10）"
+                }
+            },
+            "simulation_statistics": {
+                "name": "simulation_statistics",
+                "description": TOOL_DESC_SIMULATION_STATISTICS,
+                "parameters": {}
+            },
+            "survey_answers": {
+                "name": "survey_answers",
+                "description": TOOL_DESC_SURVEY_ANSWERS,
+                "parameters": {
+                    "query": "筛选关键词（可选，留空返回全部）"
+                }
+            },
             "insight_forge": {
                 "name": "insight_forge",
                 "description": TOOL_DESC_INSIGHT_FORGE,
@@ -949,7 +1024,9 @@ class ReportAgent:
                     "limit": "返回结果数量（可选，默认10）"
                 }
             },
-            "interview_agents": {
+        }
+        if self.interviews_available:
+            tools["interview_agents"] = {
                 "name": "interview_agents",
                 "description": TOOL_DESC_INTERVIEW_AGENTS,
                 "parameters": {
@@ -957,8 +1034,51 @@ class ReportAgent:
                     "max_agents": "最多采访的Agent数量（可选，默认5，最大10）"
                 }
             }
-        }
-    
+        return tools
+
+    TOOL_SUGGESTIONS = {
+        "search_posts": "检索Agent在模拟中写下的原文，按群体/地区筛选，用于直接引用",
+        "simulation_statistics": "获取模拟的计数统计（各群体、地区、轮次、热门帖子），用于说明结论有多少人支撑",
+        "survey_answers": "读取模拟结束后的问卷回答（购买意向、价格区间、替代方案）",
+        "insight_forge": "深度洞察分析，自动分解问题并多维度检索事实和关系",
+        "panorama_search": "广角全景搜索，了解事件全貌、时间线和演变过程",
+        "quick_search": "快速验证某个具体信息点",
+        "interview_agents": "采访模拟Agent，获取不同角色的第一人称观点和真实反应",
+    }
+
+    @staticmethod
+    def _env_alive(simulation_id: str) -> bool:
+        """Offer live interviews only while the simulation environment can answer them."""
+        try:
+            from .simulation_runner import SimulationRunner
+            return SimulationRunner.check_env_alive(simulation_id)
+        except Exception as e:
+            logger.warning(f"Could not check the simulation environment for {simulation_id}: {e}")
+            return False
+
+    @staticmethod
+    def _as_limit(value: Any, default: int = 10) -> int:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return default
+
+    def _get_tool_suggestions(self) -> str:
+        """只列出当前提供的工具的使用建议"""
+        return "\n".join(
+            f"- {name}: {self.TOOL_SUGGESTIONS[name]}"
+            for name in self.tools
+            if name in self.TOOL_SUGGESTIONS
+        )
+
+    def _activity_statistics_text(self) -> str:
+        """模拟数据库中的活动统计，供大纲规划使用；读取失败时不阻断报告"""
+        try:
+            return format_statistics(self.activity_store.statistics())
+        except Exception as e:
+            logger.warning(f"Simulation statistics unavailable for {self.simulation_id}: {e}")
+            return "(unavailable)"
+
     def _execute_tool(self, tool_name: str, parameters: Dict[str, Any], report_context: str = "") -> str:
         """
         执行工具调用
@@ -973,8 +1093,29 @@ class ReportAgent:
         """
         logger.info(t('report.executingTool', toolName=tool_name, params=parameters))
         
+        if tool_name in self.VALID_TOOL_NAMES and tool_name not in self.tools:
+            return self._unknown_tool_message(tool_name)
+
         try:
-            if tool_name == "insight_forge":
+            if tool_name == "search_posts":
+                limit = self._as_limit(parameters.get("limit"))
+                records = self.activity_store.search(
+                    query=parameters.get("query", ""),
+                    limit=min(max(limit, 1), 30),
+                    platform=parameters.get("platform") or None,
+                    segment=parameters.get("segment") or None,
+                    region=parameters.get("region") or None,
+                )
+                return format_search_results(records, self.activity_store.agents)
+
+            elif tool_name == "simulation_statistics":
+                return format_statistics(self.activity_store.statistics())
+
+            elif tool_name == "survey_answers":
+                answers = self.activity_store.survey_answers(query=parameters.get("query", ""))
+                return format_survey_answers(answers)
+
+            elif tool_name == "insight_forge":
                 query = parameters.get("query", "")
                 ctx = parameters.get("report_context", "") or report_context
                 result = self.zep_tools.insight_forge(
@@ -1061,14 +1202,20 @@ class ReportAgent:
                 return json.dumps(result, ensure_ascii=False, indent=2)
             
             else:
-                return f"未知工具: {tool_name}。请使用以下工具之一: insight_forge, panorama_search, quick_search"
+                return self._unknown_tool_message(tool_name)
                 
         except Exception as e:
             logger.error(t('report.toolExecFailed', toolName=tool_name, error=str(e)))
             return f"工具执行失败: {str(e)}"
     
+    def _unknown_tool_message(self, tool_name: str) -> str:
+        return f"未知工具: {tool_name}。请使用以下工具之一: {', '.join(self.tools)}"
+
     # 合法的工具名称集合，用于裸 JSON 兜底解析时校验
-    VALID_TOOL_NAMES = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+    VALID_TOOL_NAMES = {
+        "search_posts", "simulation_statistics", "survey_answers",
+        "insight_forge", "panorama_search", "quick_search", "interview_agents",
+    }
 
     def _parse_tool_calls(self, response: str) -> List[Dict[str, Any]]:
         """
@@ -1210,6 +1357,7 @@ class ReportAgent:
             entity_types=list(context.get('graph_statistics', {}).get('entity_types', {}).keys()),
             total_entities=context.get('total_entities', 0),
             related_facts_json=json.dumps(context.get('related_facts', [])[:10], ensure_ascii=False, indent=2),
+            activity_statistics=self._activity_statistics_text(),
         )
 
         try:
@@ -1297,6 +1445,7 @@ class ReportAgent:
             simulation_requirement=self.simulation_requirement,
             section_title=section.title,
             tools_description=self._get_tools_description(),
+            tool_suggestions=self._get_tool_suggestions(),
         )
         system_prompt = f"{system_prompt}\n\n{get_language_instruction()}"
 
@@ -1327,7 +1476,7 @@ class ReportAgent:
         min_tool_calls = 3  # 最少工具调用次数
         conflict_retries = 0  # 工具调用与Final Answer同时出现的连续冲突次数
         used_tools = set()  # 记录已调用过的工具名
-        all_tools = {"insight_forge", "panorama_search", "quick_search", "interview_agents"}
+        all_tools = set(self.tools)
 
         # 报告上下文，用于InsightForge的子问题生成
         report_context = f"章节标题: {section.title}\n模拟需求: {self.simulation_requirement}"
