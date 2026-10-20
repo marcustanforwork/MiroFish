@@ -70,11 +70,17 @@ def export_results(
     report_dir: Optional[str] = None,
     label: str = "",
     top_n: int = 15,
+    survey_prompt_contains: str = "",
 ) -> List[str]:
-    """Write the dashboard datasets for one simulation into out_dir; returns the file names written."""
+    """
+    Write the dashboard datasets for one simulation into out_dir; returns the file names written.
+
+    survey_prompt_contains keeps only interview answers whose prompt contains it,
+    so ad-hoc interviews after the survey don't replace the survey's answers.
+    """
     os.makedirs(out_dir, exist_ok=True)
     stats = store.statistics(top_n=top_n)
-    answers = store.survey_answers()
+    answers = store.survey_answers(prompt_contains=survey_prompt_contains)
 
     def breakdown(key: str, column: str) -> List[Dict[str, Any]]:
         return [{column: name, **counts} for name, counts in stats[key].items()]
