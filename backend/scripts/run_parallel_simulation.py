@@ -156,6 +156,7 @@ def init_logging_for_simulation(simulation_dir: str):
 
 
 from simulation_events import group_posts_by_agent, posts_for_round, schedule_problems
+from sim_model_settings import sim_model_config
 from action_logger import SimulationLogManager, PlatformActionLogger
 
 try:
@@ -1039,12 +1040,10 @@ def create_model(config: Dict[str, Any], use_boost: bool = False):
     
     print(f"{config_label} model={llm_model}, base_url={llm_base_url[:40] if llm_base_url else '默认'}...")
 
-    # Never put max_tokens here: camel reads it as the agent's whole context
-    # window (BaseModelBackend.token_limit), not as a cap on the reply.
-    model_config = None
-    reasoning_effort = os.environ.get("LLM_SIM_REASONING_EFFORT", "")
-    if reasoning_effort:
-        model_config = {"reasoning_effort": reasoning_effort}
+    # LLM_SIM_REASONING_EFFORT / LLM_SIM_CACHE_CONTROL; see sim_model_settings.
+    model_config = sim_model_config(os.environ)
+    if model_config:
+        print(f"{config_label} model_config={model_config}")
 
     return ModelFactory.create(
         model_platform=ModelPlatformType.OPENAI,

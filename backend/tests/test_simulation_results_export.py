@@ -93,3 +93,12 @@ def test_export_without_report_or_log(sim_dir, tmp_path):
 )
 def test_parse_intent_more_formats(response, intent):
     assert parse_intent(response) == intent
+
+
+def test_export_can_keep_only_the_survey_prompt(sim_dir, tmp_path):
+    out = tmp_path / "out"
+
+    export_results(SimulationActivityStore(str(sim_dir)), str(out), survey_prompt_contains="no such prompt")
+
+    assert _read(out, "survey.json") == []
+    assert _read(out, "kpis.json")[0]["survey_answers"] == 0
