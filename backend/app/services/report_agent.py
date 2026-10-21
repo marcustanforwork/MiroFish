@@ -865,6 +865,12 @@ REACT_INSUFFICIENT_TOOLS_MSG_ALT = (
     "请调用工具获取模拟数据。{unused_hint}"
 )
 
+REACT_UNPARSED_TOOL_CALL_MSG = (
+    "你的回复里有工具调用，但格式无法识别，工具没有执行。"
+    '请严格用这个格式调用一个工具：<tool_call>{{"name": "工具名", "parameters": {{...}}}}</tool_call>；'
+    '或者以 "Final Answer:" 开头输出章节内容。'
+)
+
 REACT_TOOL_LIMIT_MSG = (
     "工具调用次数已达上限（{tool_calls_count}/{max_tool_calls}），不能再调用工具。"
     '请立即基于已获取的信息，以 "Final Answer:" 开头输出章节内容。'
@@ -1228,13 +1234,27 @@ class ReportAgent:
         tool_calls = []
 
         # 格式1: XML风格（标准格式）
-        xml_pattern = r'<tool_call>\s*(\{.*?\})\s*</tool_call>'
-        for match in re.finditer(xml_pattern, response, re.DOTALL):
+        # Read the JSON object after each opening tag, whatever closes it: DeepSeek V4 Pro
+        # writes <tool_calls><tool_call>{...}</tool_calls>, closing only the outer tag.
+        decoder = json.JSONDecoder()
+        for match in re.finditer(r'<tool_call>\s*', response):
             try:
-                call_data = json.loads(match.group(1))
-                tool_calls.append(call_data)
+                call_data, _ = decoder.raw_decode(response, match.end())
             except json.JSONDecodeError:
-                pass
+                continue
+            if isinstance(call_data, dict):
+                tool_calls.append(call_data)
+
+        # <invoke name="tool"><parameter name="key">value</parameter></invoke>, also from V4 Pro
+        for invoke in re.finditer(r'<invoke\s+name="([^"]+)"\s*>(.*?)</invoke>', response, re.DOTALL):
+            parameters = {}
+            for param in re.finditer(r'<parameter\s+name="([^"]+)"\s*>(.*?)</parameter>', invoke.group(2), re.DOTALL):
+                value = param.group(2).strip()
+                try:
+                    parameters[param.group(1)] = json.loads(value)
+                except json.JSONDecodeError:
+                    parameters[param.group(1)] = value
+            tool_calls.append({"name": invoke.group(1), "parameters": parameters})
 
         if tool_calls:
             return tool_calls
@@ -1263,6 +1283,10 @@ class ReportAgent:
                 pass
 
         return tool_calls
+
+    @staticmethod
+    def _looks_like_tool_call(response: str) -> bool:
+        return re.search(r'<(tool_calls?|invoke|function_calls?)\b', response) is not None
 
     def _is_valid_tool_call(self, data: dict) -> bool:
         """校验解析出的 JSON 是否是合法的工具调用"""
@@ -1676,6 +1700,11 @@ class ReportAgent:
                         unused_hint=unused_hint,
                     ),
                 })
+                continue
+
+            # A tool call in a form the parser doesn't read is never the chapter
+            if self._looks_like_tool_call(response):
+                messages.append({"role": "user", "content": REACT_UNPARSED_TOOL_CALL_MSG})
                 continue
 
             # 工具调用已足够，LLM 输出了内容但没带 "Final Answer:" 前缀
