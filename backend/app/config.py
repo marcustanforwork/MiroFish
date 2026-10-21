@@ -14,6 +14,12 @@ else:
     load_dotenv(override=True)
 
 
+def max_retries_from(environ) -> int:
+    """LLM_MAX_RETRIES: how often the OpenAI client retries a 429 or 5xx, with backoff. Default 2, the SDK's own."""
+    value = (environ.get('LLM_MAX_RETRIES') or '').strip()
+    return int(value) if value.isdigit() else 2
+
+
 class Config:
     """Flask配置类"""
     
@@ -28,6 +34,7 @@ class Config:
     LLM_API_KEY = os.environ.get('LLM_API_KEY')
     LLM_BASE_URL = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     LLM_MODEL_NAME = os.environ.get('LLM_MODEL_NAME', 'gpt-4o-mini')
+    LLM_MAX_RETRIES = max_retries_from(os.environ)
     
     # Zep配置
     ZEP_API_KEY = os.environ.get('ZEP_API_KEY')
