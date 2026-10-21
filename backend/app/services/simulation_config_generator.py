@@ -238,7 +238,8 @@ class SimulationConfigGenerator:
         
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            max_retries=Config.LLM_MAX_RETRIES
         )
     
     def generate_config(

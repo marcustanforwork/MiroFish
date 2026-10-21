@@ -170,6 +170,9 @@ try:
         generate_twitter_agent_graph,
         generate_reddit_agent_graph
     )
+    import oasis.social_platform.recsys as oasis_recsys
+    from recsys_memory import limit_embedding_batch
+    limit_embedding_batch(oasis_recsys, 64)
 except ImportError as e:
     print(f"错误: 缺少依赖 {e}")
     print("请先安装: pip install oasis-ai camel-ai")

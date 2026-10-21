@@ -257,7 +257,8 @@ class OasisProfileGenerator:
         
         self.client = OpenAI(
             api_key=self.api_key,
-            base_url=self.base_url
+            base_url=self.base_url,
+            max_retries=Config.LLM_MAX_RETRIES
         )
         
         # Zep客户端用于检索丰富上下文

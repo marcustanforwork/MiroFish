@@ -139,6 +139,18 @@ def parse_intent(response: str) -> str:
     return match.group(1).upper() if match else ""
 
 
+_ROLE_PATTERN = re.compile(
+    r"^[\s*_]*(?:q(?:uestion)?\s*)?0\s*[.):][\s*_]*(host|channel|competitor|neither)\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def parse_role(response: str) -> str:
+    """HOST, CHANNEL, COMPETITOR or NEITHER from run 2's survey question 0; '' when there is none."""
+    match = _ROLE_PATTERN.search(response or "")
+    return match.group(1).upper() if match else ""
+
+
 def _query_terms(query: str) -> List[str]:
     words = re.findall(r"[\w$]+", (query or "").lower())
     return [w for w in dict.fromkeys(words) if (len(w) >= 3 or not w.isascii()) and w not in _STOPWORDS]

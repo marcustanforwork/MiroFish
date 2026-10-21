@@ -12,7 +12,7 @@ import os
 import re
 from typing import Any, Dict, List, Optional
 
-from .simulation_activity import SimulationActivityStore, parse_intent
+from .simulation_activity import SimulationActivityStore, parse_intent, parse_role
 
 _SIM_MODEL_PATTERN = re.compile(r"\[SIM\] model=([^,\s]+)")
 
@@ -115,7 +115,8 @@ def export_results(
         _write(out_dir, "survey.json", [
             {
                 "platform": a.platform, "agent": a.agent_name, "segment": a.entity_type,
-                "region": a.region, "intent": parse_intent(a.response), "answer": a.response,
+                "region": a.region, "role": parse_role(a.response), "intent": parse_intent(a.response),
+                "answer": a.response,
             }
             for a in answers
         ]),

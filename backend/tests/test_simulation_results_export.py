@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from app.services.simulation_activity import SimulationActivityStore, parse_intent
+from app.services.simulation_activity import SimulationActivityStore, parse_intent, parse_role
 from app.services.simulation_results_export import export_results
 
 
@@ -102,3 +102,18 @@ def test_export_can_keep_only_the_survey_prompt(sim_dir, tmp_path):
 
     assert _read(out, "survey.json") == []
     assert _read(out, "kpis.json")[0]["survey_answers"] == 0
+
+
+@pytest.mark.parametrize(
+    ("response", "role"),
+    [
+        ("0. HOST — our wedding is in May.\n1. MAYBE — price.", "HOST"),
+        ("**0. Channel** — I'm a planner.\n1. YES", "CHANNEL"),
+        ("0) COMPETITOR\n1. n/a", "COMPETITOR"),
+        ("0. NEITHER.\n1. n/a", "NEITHER"),
+        ("1. MAYBE — the main run had no question 0.", ""),
+        ("0. I host parties, sometimes.", ""),
+    ],
+)
+def test_parse_role(response, role):
+    assert parse_role(response) == role
